@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Modelos y caché de Hugging Face (se descargan solos, no van al repo)
+.cache/
+models/
+*.safetensors
+*.bin
+
+# Gradio
+flagged/
+.gradio/
+
+# IDE / SO
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
