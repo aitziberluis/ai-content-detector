@@ -1,8 +1,9 @@
 """Detector de imágenes generadas por IA.
 
-Usa un modelo preentrenado de Hugging Face (Swin Transformer afinado para
-distinguir imágenes reales de imágenes generadas por modelos de difusión).
-El modelo se descarga automáticamente la primera vez que se usa.
+Usa dos modelos preentrenados de Hugging Face como "ensemble de segunda
+opinión": cada uno da su probabilidad y se combinan en un veredicto. Si
+discrepan mucho, eso también es información útil para el usuario.
+Los modelos se descargan automáticamente la primera vez que se usan.
 """
 
 from __future__ import annotations
@@ -10,13 +11,28 @@ from __future__ import annotations
 from PIL import Image
 from transformers import pipeline
 
-# Swin-base afinado sobre imágenes reales vs. generadas (SDXL y similares).
-# Etiquetas del modelo: "artificial" (IA) y "human" (real).
-DEFAULT_MODEL = "Organika/sdxl-detector"
+# Etiquetas de ambos modelos: "artificial" (IA) y "human" (real).
+PRIMARY_MODEL = "Organika/sdxl-detector"
+SECOND_MODEL = "umm-maybe/AI-image-detector"
+
+# Diferencia entre modelos a partir de la cual avisamos de discrepancia.
+DISAGREEMENT_THRESHOLD = 0.35
+
+
+def _ai_score(results: list[dict]) -> float:
+    """Extrae la probabilidad de "generada por IA" de la salida del pipeline,
+    tolerando distintos nombres de etiqueta entre modelos."""
+    for r in results:
+        if r["label"].lower() in ("artificial", "ai", "fake"):
+            return r["score"]
+    for r in results:
+        if r["label"].lower() in ("human", "real"):
+            return 1.0 - r["score"]
+    return 0.0
 
 
 class ImageDetector:
-    def __init__(self, model_name: str = DEFAULT_MODEL):
+    def __init__(self, model_name: str = PRIMARY_MODEL):
         self.model_name = model_name
         self._pipeline = None
 
@@ -28,18 +44,35 @@ class ImageDetector:
             self._pipeline = pipeline("image-classification", model=self.model_name)
         return self._pipeline
 
-    def predict(self, image: Image.Image) -> dict[str, float]:
-        """Devuelve {"Generada por IA": prob, "Real (humana)": prob}."""
+    def predict_ai_probability(self, image: Image.Image) -> float:
         if image.mode != "RGB":
             image = image.convert("RGB")
+        return _ai_score(self.pipeline(image))
 
-        results = self.pipeline(image)
-        scores = {r["label"].lower(): r["score"] for r in results}
 
-        ai_score = scores.get("artificial", 0.0)
-        human_score = scores.get("human", 1.0 - ai_score)
+class ImageEnsemble:
+    """Ejecuta varios detectores sobre la misma imagen y combina resultados."""
 
+    def __init__(self, model_names: tuple[str, ...] = (PRIMARY_MODEL, SECOND_MODEL)):
+        self.detectors = [ImageDetector(name) for name in model_names]
+
+    def predict(self, image: Image.Image) -> dict:
+        """Devuelve la probabilidad combinada, la de cada modelo y si discrepan.
+
+        {
+            "ai_probability": float,          # media de los modelos
+            "per_model": {nombre: float},     # probabilidad IA de cada uno
+            "disagreement": bool,             # True si difieren mucho
+        }
+        """
+        per_model = {
+            d.model_name: round(d.predict_ai_probability(image), 4)
+            for d in self.detectors
+        }
+        scores = list(per_model.values())
+        spread = max(scores) - min(scores)
         return {
-            "Generada por IA": round(ai_score, 4),
-            "Real (humana)": round(human_score, 4),
+            "ai_probability": round(sum(scores) / len(scores), 4),
+            "per_model": per_model,
+            "disagreement": spread >= DISAGREEMENT_THRESHOLD,
         }

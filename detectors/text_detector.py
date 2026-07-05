@@ -3,9 +3,15 @@
 Usa un RoBERTa afinado por el equipo Hello-SimpleAI (proyecto HC3) para
 distinguir texto humano de texto generado por modelos tipo ChatGPT.
 Funciona mejor con textos en inglés de al menos ~50 palabras.
+
+Además del veredicto global, puede analizar el texto párrafo a párrafo,
+para detectar el caso realista de "texto humano con párrafos de IA
+incrustados".
 """
 
 from __future__ import annotations
+
+import re
 
 from transformers import pipeline
 
@@ -13,6 +19,19 @@ from transformers import pipeline
 DEFAULT_MODEL = "Hello-SimpleAI/chatgpt-detector-roberta"
 
 MIN_WORDS = 20
+# Un párrafo más corto que esto se analiza igualmente, pero se marca
+# como poco fiable en vez de descartarse.
+MIN_PARAGRAPH_WORDS = 15
+
+
+def _ai_score(results: list[dict]) -> float:
+    for r in results:
+        if r["label"].lower() in ("chatgpt", "ai", "fake"):
+            return r["score"]
+    for r in results:
+        if r["label"].lower() in ("human", "real"):
+            return 1.0 - r["score"]
+    return 0.0
 
 
 class TextDetector:
@@ -32,8 +51,8 @@ class TextDetector:
             )
         return self._pipeline
 
-    def predict(self, text: str) -> dict[str, float]:
-        """Devuelve {"Generado por IA": prob, "Humano": prob}.
+    def predict_ai_probability(self, text: str) -> float:
+        """Probabilidad de que el texto completo sea generado por IA.
 
         Lanza ValueError si el texto es demasiado corto para dar una
         predicción con alguna garantía.
@@ -45,14 +64,29 @@ class TextDetector:
                 f"El texto tiene {n_words} palabras; se necesitan al menos "
                 f"{MIN_WORDS} para una predicción fiable."
             )
+        return _ai_score(self.pipeline(text, top_k=None))
 
-        results = self.pipeline(text, top_k=None)
-        scores = {r["label"].lower(): r["score"] for r in results}
+    def predict_paragraphs(self, text: str) -> list[dict]:
+        """Analiza el texto párrafo a párrafo.
 
-        ai_score = scores.get("chatgpt", 0.0)
-        human_score = scores.get("human", 1.0 - ai_score)
-
-        return {
-            "Generado por IA": round(ai_score, 4),
-            "Humano": round(human_score, 4),
+        Devuelve una lista de dicts:
+        {
+            "text": str,            # el párrafo
+            "n_words": int,
+            "ai_probability": float,
+            "reliable": bool,       # False si el párrafo es muy corto
         }
+        """
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+        results = []
+        for p in paragraphs:
+            n_words = len(p.split())
+            results.append(
+                {
+                    "text": p,
+                    "n_words": n_words,
+                    "ai_probability": round(_ai_score(self.pipeline(p, top_k=None)), 4),
+                    "reliable": n_words >= MIN_PARAGRAPH_WORDS,
+                }
+            )
+        return results
